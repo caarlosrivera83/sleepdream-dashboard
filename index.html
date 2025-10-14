@@ -1,0 +1,112 @@
+<!doctype html><meta charset="utf-8">
+<title>SleepDream - lecturas (24h)</title>
+<h1>SleepDream – Ruido (dB) y Pulso (BPM)</h1>
+<div id="last" style="margin:6px 0;color:#555;font:14px/1.2 system-ui"></div>
+
+<canvas id="ruido" height="120"></canvas>
+<canvas id="pulso" height="120" style="margin-top:24px;"></canvas>
+
+<h2 style="margin-top:24px;">Últimos registros</h2>
+<table id="tbl" border="1" cellpadding="6" style="border-collapse:collapse;font:14px system-ui">
+  <thead><tr><th>Hora</th><th>Ruido (dB)</th><th>Pulso (BPM)</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+const PROJECT = "tqxiecgruhcnpuvciypa"; // tu project ref
+const ANON    = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRxeGllY2dydWhjbnB1dmNpeXBhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA0NTkzODQsImV4cCI6MjA3NjAzNTM4NH0.FOdMzy8O2mdTD0ObEcy34Jllue5lzMsOGqFIs6QFlLU"; // tu anon key
+const DEVICE  = "eb6f6de7-52f3-4f8e-ae05-b0be31b5997e"; // tu dispositivo
+
+// REST base y query (filtra por tu dispositivo; orden ascendente por tiempo)
+const base = `https://${PROJECT}.supabase.co/rest/v1/lecturas`;
+const url  = `${base}?select=ts,ruido_db,pulso_bpm&dispositivo_id=eq.${DEVICE}&order=ts.asc`;
+
+async function fetchData(){
+  const r = await fetch(url, {
+    headers: { "apikey": ANON, "Authorization": "Bearer " + ANON }
+  });
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function makeLine(ctx, labels, data, label){
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{ label, data, tension: 0.2 }]},
+    options: {
+      responsive: true,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { ticks: { maxRotation: 0 } },
+        y: { beginAtZero: false }
+      },
+      plugins: {
+        legend: { labels: { boxWidth: 12 } }
+      }
+    }
+  });
+}
+
+function renderTable(rows){
+  const tb = document.querySelector('#tbl tbody');
+  tb.innerHTML = rows.slice(-50).reverse().map(r => `
+    <tr>
+      <td>${new Date(r.ts).toLocaleString()}</td>
+      <td>${r.ruido_db?.toFixed(2) ?? ""}</td>
+      <td>${r.pulso_bpm ?? ""}</td>
+    </tr>
+  `).join("");
+}
+
+function setLastUpdated(){
+  document.getElementById('last').textContent =
+    "Última actualización: " + new Date().toLocaleString();
+}
+
+let ruidoChart, pulsoChart;
+
+async function initialLoad(){
+  const rows = await fetchData();
+  const labels = rows.map(r => new Date(r.ts).toLocaleTimeString());
+  const ruido  = rows.map(r => r.ruido_db);
+  const pulso  = rows.map(r => r.pulso_bpm);
+
+  ruidoChart = makeLine(document.getElementById('ruido'), labels, ruido, 'Ruido (dB)');
+  pulsoChart = makeLine(document.getElementById('pulso'), labels, pulso, 'Pulso (BPM)');
+
+  renderTable(rows);
+  setLastUpdated();
+}
+
+async function refresh(){
+  try{
+    const rows = await fetchData();
+    const labels = rows.map(r => new Date(r.ts).toLocaleTimeString());
+    const ruido  = rows.map(r => r.ruido_db);
+    const pulso  = rows.map(r => r.pulso_bpm);
+
+    // Actualiza datasets sin recrear las gráficas
+    ruidoChart.data.labels = labels;
+    ruidoChart.data.datasets[0].data = ruido;
+    ruidoChart.update();
+
+    pulsoChart.data.labels = labels;
+    pulsoChart.data.datasets[0].data = pulso;
+    pulsoChart.update();
+
+    renderTable(rows);
+    setLastUpdated();
+  }catch(e){
+    console.warn("Refresh error:", e.message);
+  }
+}
+
+// Carga inicial y auto-refresh cada 3 s
+initialLoad().then(() => {
+  setInterval(refresh, 3000);
+}).catch(e => {
+  document.body.insertAdjacentHTML('beforeend', `<pre style="color:#b00">Error inicial: ${e.message}</pre>`);
+});
+</script>
