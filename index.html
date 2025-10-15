@@ -12,21 +12,22 @@
   table{width:100%;border-collapse:collapse}
   th,td{border:1px solid #e5e5e5;padding:6px;text-align:left}
   th{background:#fafafa}
-  .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#eee;margin-left:6px}
 </style>
 
 <h1>SleepDream – Panel</h1>
 <div class="muted" id="last">Cargando…</div>
 
-<div style="margin:10px 0; display:flex; gap:10px; align-items:center;">
+<div style="margin:10px 0; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
   <label>Dispositivo:</label>
   <select id="deviceSel"><option value="">Todos</option></select>
   <label style="margin-left:10px;">Ventana:</label>
   <select id="winSel">
+    <option value="0.25" selected>15 min</option>
+    <option value="1">1 h</option>
     <option value="2">2 h</option>
     <option value="6">6 h</option>
     <option value="12">12 h</option>
-    <option value="24" selected>24 h</option>
+    <option value="24">24 h</option>
   </select>
   <button id="refreshBtn">Actualizar</button>
 </div>
@@ -52,27 +53,25 @@
       <thead><tr><th>Inicio</th><th>Fin</th><th>Pico dB</th><th>Umbral</th><th>Muestras</th></tr></thead>
       <tbody></tbody>
     </table>
-    <div class="muted">Requiere vista <code>ruido_eventos</code>.</div>
+    <div class="muted">Requiere la vista <code>ruido_eventos</code> en la BD.</div>
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
+/* ======= CONFIG ======= */
 const PROJECT = "tqxiecgruhcnpuvciypa";  // tu project ref
 const ANON    = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRxeGllY2dydWhjbnB1dmNpeXBhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA0NTkzODQsImV4cCI6MjA3NjAzNTM4NH0.FOdMzy8O2mdTD0ObEcy34Jllue5lzMsOGqFIs6QFlLU";
 const REST = `https://${PROJECT}.supabase.co/rest/v1`;
+const H = { apikey: ANON, Authorization: "Bearer " + ANON };
 
-const H = {
-  apikey: ANON,
-  Authorization: "Bearer " + ANON
-};
-
+/* ======= UI refs ======= */
 const deviceSel = document.getElementById('deviceSel');
 const winSel    = document.getElementById('winSel');
 const lastLbl   = document.getElementById('last');
 document.getElementById('refreshBtn').onclick = () => loadAll();
 
-// --- Utils ---
+/* ======= Utils ======= */
 function isoHoursAgo(h){ return new Date(Date.now() - h*3600e3).toISOString(); }
 function fmtTime(s){ return new Date(s).toLocaleTimeString(); }
 function fmtDate(s){ return new Date(s).toLocaleString(); }
@@ -83,7 +82,26 @@ async function fetchJSON(url){
   return r.json();
 }
 
-// Distintos dispositivos (de lecturas últimas 24h)
+/* ======= Downsampling para no saturar ======= */
+const MAX_POINTS = 800;  // máximo de puntos por serie que se grafican
+
+function downsampleEveryN(arr, n) {
+  if (n <= 1) return arr;
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr[i]);
+  return out;
+}
+
+function maybeThin(labels, seriesList) {
+  const L = labels.length;
+  if (L <= MAX_POINTS) return { labels, seriesList };
+  const n = Math.ceil(L / MAX_POINTS);
+  const labels2 = downsampleEveryN(labels, n);
+  const thinned = seriesList.map(s => downsampleEveryN(s, n));
+  return { labels: labels2, seriesList: thinned };
+}
+
+/* ======= Data loaders ======= */
 async function loadDevices(){
   const since = isoHoursAgo(24);
   const url = `${REST}/lecturas?select=dispositivo_id&ts=gte.${since}&order=dispositivo_id.asc`;
@@ -93,9 +111,8 @@ async function loadDevices(){
     `<option value="${id}">${id.slice(0,8)}…</option>`).join('');
 }
 
-// Lecturas (con filtros)
 async function loadLecturas(){
-  const hours = parseInt(winSel.value, 10);
+  const hours = parseFloat(winSel.value);
   const since = isoHoursAgo(hours);
   let url = `${REST}/lecturas?select=ts,dispositivo_id,ruido_db,ruido_peak_db,limit_db,over_limit,pulso_bpm,spo2_pct&ts=gte.${since}&order=ts.asc`;
   const dev = deviceSel.value.trim();
@@ -103,19 +120,17 @@ async function loadLecturas(){
   return fetchJSON(url);
 }
 
-// Eventos (si existe la vista)
 async function loadEventos(){
-  const hours = parseInt(winSel.value, 10);
+  const hours = parseFloat(winSel.value);
   const since = isoHoursAgo(hours);
-  // La vista puede no estar; ignoramos error si 404
   let url = `${REST}/ruido_eventos?select=start_ts,end_ts,peak_db,limit_db,samples&start_ts=gte.${since}&order=start_ts.desc`;
   const dev = deviceSel.value.trim();
   if (dev) url += `&dispositivo_id=eq.${dev}`;
   try { return await fetchJSON(url); }
-  catch(e){ console.warn("Eventos no disponibles:", e.message); return []; }
+  catch { return []; } // si no existe la vista, simplemente no muestra eventos
 }
 
-// Charts
+/* ======= Charts ======= */
 let ruidoChart, pulsoChart, spo2Chart;
 function makeLine(ctx, labels, datasets, yTitle){
   return new Chart(ctx, {
@@ -133,64 +148,69 @@ function makeLine(ctx, labels, datasets, yTitle){
   });
 }
 
+/* ======= Render ======= */
 function renderLecturas(rows){
-  // Labels
+  // Series base
   const labels = rows.map(r => fmtTime(r.ts));
+  const ruido  = rows.map(r => r.ruido_db ?? null);
+  const peak   = rows.map(r => r.ruido_peak_db ?? null);
 
-  // Ruido
-  const ruido = rows.map(r => r.ruido_db ?? null);
-  const peak  = rows.map(r => r.ruido_peak_db ?? null);
-  // Umbral: si cambia por fila, usamos valor de la fila; si null, repetimos anterior
+  // Umbral: si viene null, repetimos el último conocido
   const limit = [];
   let lastLim = null;
-  for (const r of rows){
-    lastLim = (r.limit_db ?? lastLim ?? null);
-    limit.push(lastLim);
-  }
+  for (const r of rows){ lastLim = (r.limit_db ?? lastLim ?? null); limit.push(lastLim); }
 
-  // Pulso y SpO2
-  const bpm  = rows.map(r => r.pulso_bpm ?? null);
-  const spo2 = rows.map(r => r.spo2_pct ?? null);
+  const bpm   = rows.map(r => r.pulso_bpm ?? null);
+  const spo2  = rows.map(r => r.spo2_pct ?? null);
 
-  // (Re)crear o actualizar charts
+  // Submuestreo si hay demasiados puntos
+  let { labels: L2, seriesList } = maybeThin(labels, [ruido, peak, limit, bpm, spo2]);
+  const [rruido, rpeak, rlimit, rbpm, rspo2] = seriesList;
+
+  // Ruido
   if (!ruidoChart) {
-    ruidoChart = makeLine(document.getElementById('ruido'),
-      labels,
+    ruidoChart = makeLine(
+      document.getElementById('ruido'),
+      L2,
       [
-        { label: 'Ruido (dB)', data: ruido, tension: 0.2 },
-        { label: 'Pico (dB)', data: peak, tension: 0.2 },
-        { label: 'Umbral (dB)', data: limit, tension: 0, borderDash: [6,6] }
+        { label: 'Ruido (dB)', data: rruido, tension: 0.2 },
+        { label: 'Pico (dB)',  data: rpeak,  tension: 0.2 },
+        { label: 'Umbral (dB)',data: rlimit, tension: 0, borderDash: [6,6] }
       ],
       'dB'
     );
   } else {
-    Object.assign(ruidoChart.data, { labels, datasets: [
-      { label: 'Ruido (dB)', data: ruido, tension: 0.2 },
-      { label: 'Pico (dB)', data: peak, tension: 0.2 },
-      { label: 'Umbral (dB)', data: limit, tension: 0, borderDash: [6,6] }
+    Object.assign(ruidoChart.data, { labels: L2, datasets: [
+      { label: 'Ruido (dB)', data: rruido, tension: 0.2 },
+      { label: 'Pico (dB)',  data: rpeak,  tension: 0.2 },
+      { label: 'Umbral (dB)',data: rlimit, tension: 0, borderDash: [6,6] }
     ]});
     ruidoChart.update();
   }
 
+  // Pulso
   if (!pulsoChart) {
-    pulsoChart = makeLine(document.getElementById('pulso'),
-      labels,
-      [{ label: 'BPM', data: bpm, tension: 0.2 }],
+    pulsoChart = makeLine(
+      document.getElementById('pulso'),
+      L2,
+      [{ label: 'BPM', data: rbpm, tension: 0.2 }],
       'BPM'
     );
   } else {
-    Object.assign(pulsoChart.data, { labels, datasets: [{ label: 'BPM', data: bpm, tension: 0.2 }]});
+    Object.assign(pulsoChart.data, { labels: L2, datasets: [{ label: 'BPM', data: rbpm, tension: 0.2 }]});
     pulsoChart.update();
   }
 
+  // SpO2
   if (!spo2Chart) {
-    spo2Chart = makeLine(document.getElementById('spo2'),
-      labels,
-      [{ label: 'SpO₂ (%)', data: spo2, tension: 0.2 }],
+    spo2Chart = makeLine(
+      document.getElementById('spo2'),
+      L2,
+      [{ label: 'SpO₂ (%)', data: rspo2, tension: 0.2 }],
       '%'
     );
   } else {
-    Object.assign(spo2Chart.data, { labels, datasets: [{ label: 'SpO₂ (%)', data: spo2, tension: 0.2 }]});
+    Object.assign(spo2Chart.data, { labels: L2, datasets: [{ label: 'SpO₂ (%)', data: rspo2, tension: 0.2 }]});
     spo2Chart.update();
   }
 
@@ -203,7 +223,7 @@ function renderLecturas(rows){
       <td>${r.ruido_db ?? ''}</td>
       <td>${r.ruido_peak_db ?? ''}</td>
       <td>${r.limit_db ?? ''}</td>
-      <td>${r.over_limit ? 'Sí' : (r.over_limit===false?'No':'')}</td>
+      <td>${r.over_limit === true ? 'Sí' : (r.over_limit === false ? 'No' : '')}</td>
       <td>${r.pulso_bpm ?? ''}</td>
       <td>${r.spo2_pct ?? ''}</td>
     </tr>
@@ -223,6 +243,7 @@ function renderEventos(rows){
   `).join('');
 }
 
+/* ======= Orquestación ======= */
 async function loadAll(){
   lastLbl.textContent = 'Actualizando…';
   const [lecturas, eventos] = await Promise.all([loadLecturas(), loadEventos()]);
@@ -235,8 +256,7 @@ async function loadAll(){
   try {
     await loadDevices();
     await loadAll();
-    // Auto-refresh cada 5 s
-    setInterval(loadAll, 5000);
+    setInterval(loadAll, 5000); // auto-refresh 5 s
   } catch(e){
     document.body.insertAdjacentHTML('beforeend', `<pre style="color:#b00">Error: ${e.message}</pre>`);
   }
