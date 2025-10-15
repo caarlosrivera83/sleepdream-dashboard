@@ -35,14 +35,13 @@
 <div class="row">
   <div class="card"><canvas id="ruido"></canvas></div>
   <div class="card"><canvas id="pulso"></canvas></div>
-  <div class="card full"><canvas id="spo2"></canvas></div>
 </div>
 
 <div class="row" style="margin-top:16px;">
   <div class="card full">
     <h3 style="margin-top:0">Últimos registros</h3>
     <table id="tbl">
-      <thead><tr><th>Hora</th><th>Ruido dB</th><th>Pico dB</th><th>Umbral</th><th>Over</th><th>BPM</th><th>SpO₂ %</th></tr></thead>
+      <thead></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -82,16 +81,14 @@ async function fetchJSON(url){
   return r.json();
 }
 
-/* ======= Downsampling para no saturar ======= */
-const MAX_POINTS = 800;  // máximo de puntos por serie que se grafican
-
+/* ======= Downsampling ======= */
+const MAX_POINTS = 800;
 function downsampleEveryN(arr, n) {
   if (n <= 1) return arr;
   const out = [];
   for (let i = 0; i < arr.length; i += n) out.push(arr[i]);
   return out;
 }
-
 function maybeThin(labels, seriesList) {
   const L = labels.length;
   if (L <= MAX_POINTS) return { labels, seriesList };
@@ -114,6 +111,7 @@ async function loadDevices(){
 async function loadLecturas(){
   const hours = parseFloat(winSel.value);
   const since = isoHoursAgo(hours);
+  // seguimos trayendo spo2_pct por si más adelante la vuelves a usar en la tabla
   let url = `${REST}/lecturas?select=ts,dispositivo_id,ruido_db,ruido_peak_db,limit_db,over_limit,pulso_bpm,spo2_pct&ts=gte.${since}&order=ts.asc`;
   const dev = deviceSel.value.trim();
   if (dev) url += `&dispositivo_id=eq.${dev}`;
@@ -127,11 +125,11 @@ async function loadEventos(){
   const dev = deviceSel.value.trim();
   if (dev) url += `&dispositivo_id=eq.${dev}`;
   try { return await fetchJSON(url); }
-  catch { return []; } // si no existe la vista, simplemente no muestra eventos
+  catch { return []; }
 }
 
 /* ======= Charts ======= */
-let ruidoChart, pulsoChart, spo2Chart;
+let ruidoChart, pulsoChart;
 function makeLine(ctx, labels, datasets, yTitle){
   return new Chart(ctx, {
     type: 'line',
@@ -161,7 +159,7 @@ function renderLecturas(rows){
   for (const r of rows){ lastLim = (r.limit_db ?? lastLim ?? null); limit.push(lastLim); }
 
   const bpm   = rows.map(r => r.pulso_bpm ?? null);
-  const spo2  = rows.map(r => r.spo2_pct ?? null);
+  const spo2  = rows.map(r => r.spo2_pct ?? null); // por si lo quieres mostrar luego en la tabla
 
   // Submuestreo si hay demasiados puntos
   let { labels: L2, seriesList } = maybeThin(labels, [ruido, peak, limit, bpm, spo2]);
@@ -201,33 +199,36 @@ function renderLecturas(rows){
     pulsoChart.update();
   }
 
-  // SpO2
-  if (!spo2Chart) {
-    spo2Chart = makeLine(
-      document.getElementById('spo2'),
-      L2,
-      [{ label: 'SpO₂ (%)', data: rspo2, tension: 0.2 }],
-      '%'
-    );
-  } else {
-    Object.assign(spo2Chart.data, { labels: L2, datasets: [{ label: 'SpO₂ (%)', data: rspo2, tension: 0.2 }]});
-    spo2Chart.update();
-  }
-
-  // Tabla últimos N
-  const tb = document.querySelector('#tbl tbody');
+  // -------- Tabla dinámica (oculta columnas vacías) --------
   const last = rows.slice(-50).reverse();
-  tb.innerHTML = last.map(r => `
-    <tr>
-      <td>${fmtDate(r.ts)}</td>
-      <td>${r.ruido_db ?? ''}</td>
-      <td>${r.ruido_peak_db ?? ''}</td>
-      <td>${r.limit_db ?? ''}</td>
-      <td>${r.over_limit === true ? 'Sí' : (r.over_limit === false ? 'No' : '')}</td>
-      <td>${r.pulso_bpm ?? ''}</td>
-      <td>${r.spo2_pct ?? ''}</td>
-    </tr>
-  `).join('');
+
+  // Definición de columnas potenciales
+  const COLS = [
+    { key: 'ts',            label: 'Hora',        fmt: r => fmtDate(r.ts), always: true },
+    { key: 'ruido_db',      label: 'Ruido dB',    fmt: r => r.ruido_db ?? '' },
+    { key: 'ruido_peak_db', label: 'Pico dB',     fmt: r => r.ruido_peak_db ?? '' },
+    { key: 'limit_db',      label: 'Umbral',      fmt: r => r.limit_db ?? '' },
+    { key: 'over_limit',    label: 'Over',        fmt: r => (r.over_limit===true?'Sí':(r.over_limit===false?'No':'')) },
+    { key: 'pulso_bpm',     label: 'BPM',         fmt: r => r.pulso_bpm ?? '' },
+    { key: 'spo2_pct',      label: 'SpO₂ %',      fmt: r => r.spo2_pct ?? '' }
+  ];
+
+  // Detecta qué columnas tienen al menos un valor (excepto 'ts' que siempre va)
+  const hasValue = (rows, key) => {
+    if (key === 'over_limit') return rows.some(r => r.over_limit === true || r.over_limit === false);
+    return rows.some(r => r[key] !== null && r[key] !== undefined && r[key] !== '');
+  };
+  const activeCols = COLS.filter(c => c.always || hasValue(last, c.key));
+
+  // Render header
+  const thead = document.querySelector('#tbl thead');
+  thead.innerHTML = '<tr>' + activeCols.map(c => `<th>${c.label}</th>`).join('') + '</tr>';
+
+  // Render body
+  const tb = document.querySelector('#tbl tbody');
+  tb.innerHTML = last.map(r =>
+    '<tr>' + activeCols.map(c => `<td>${c.fmt(r)}</td>`).join('') + '</tr>'
+  ).join('');
 }
 
 function renderEventos(rows){
